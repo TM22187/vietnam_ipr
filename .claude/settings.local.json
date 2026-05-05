@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -X utf8 generate_slides.py)"
+    ]
+  }
+}

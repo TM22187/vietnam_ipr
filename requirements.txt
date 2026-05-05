@@ -1,0 +1,9 @@
+# Vietnam LPR — use a venv; after a working install: pip freeze > requirements-lock.txt
+# lpr_pipeline uses PaddleOCR 3.x API (.predict, rec_texts). For 2.x you must change read_plate_text.
+
+ultralytics>=8.0,<9
+paddleocr>=3.0.0,<4
+paddlepaddle>=3.0.0,<4
+opencv-python>=4.8
+numpy>=1.24
+matplotlib>=3.7

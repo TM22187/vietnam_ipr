@@ -1,0 +1,14 @@
+# YOLO dataset — train from repo root:
+#   yolo detect train data=config/data.yaml model=yolov8s.pt ...
+# path is relative to this YAML file → ../dataset
+
+path: ../dataset
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 3
+names:
+  0: car
+  1: motorcycle
+  2: plate

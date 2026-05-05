@@ -1,0 +1,9 @@
+# ByteTrack tuned for moving vehicles / plates (longer memory on occlusion).
+
+tracker_type: bytetrack
+track_high_thresh: 0.2
+track_low_thresh: 0.08
+new_track_thresh: 0.2
+track_buffer: 50
+match_thresh: 0.75
+fuse_score: True

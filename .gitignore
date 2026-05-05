@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# YOLO training runs
+runs/
+
+# Label cache
+*.cache
+
+# Model weights (large files, use Git LFS or download separately)
+*.pt
+
+# Saved frames
+capture_*.jpg
+save_*.jpg
+captures/
+
+# IDE
+.vscode/
+.idea/
+
+# MS Office lock files
+~$*
+dataset/
+*.onnx
+*.mp4
+*.avi
+*.jpg
+*.png
