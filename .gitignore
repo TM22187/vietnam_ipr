@@ -30,3 +30,6 @@ dataset/
 *.avi
 *.jpg
 *.png
+
+# Local configurations
+config/roi.yaml

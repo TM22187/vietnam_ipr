@@ -11,11 +11,13 @@ vietnam_ipr/
 ├── README.md
 ├── config/
 │   ├── bytetrack_lpr.yaml    # Tracker (traffic-friendly)
-│   └── data.yaml             # Train từ root: yolo detect train data=config/data.yaml ...
+│   ├── data.yaml             # Train từ root: yolo detect train data=config/data.yaml ...
+│   └── roi.yaml              # Vùng nhận dạng ROI (tùy chọn, gitignored)
 ├── scripts/
 │   ├── run_webcam.py
 │   ├── run_video.py
-│   └── test_image.py
+│   ├── test_image.py
+│   └── set_roi.py            # Công cụ chọn vùng ROI tương tác
 ├── weights/
 │   ├── best_vietnam_lpr.pt   # Put trained weights here (ưu tiên khi không truyền --model)
 │   └── pretrained/           # yolov8s.pt / yolo26n.pt (train & notebook)
@@ -52,6 +54,24 @@ python scripts/run_video.py --video clip.mp4 --output out.mp4 --no-preview
 
 python scripts/test_image.py --image photo.jpg
 ```
+## Cấu hình Vùng nhận dạng (ROI)
+
+Để tối ưu hóa hiệu năng và tránh nhận dạng nhầm các biển số ở xa hoặc ngoài luồng xe, bạn có thể thiết lập vùng ROI (Region of Interest):
+
+1. **Thiết lập ROI tương tác:**
+   ```bash
+   python scripts/set_roi.py
+   # Hoặc dùng camera/video khác:
+   python scripts/set_roi.py --camera 1
+   python scripts/set_roi.py --video path/to/video.mp4
+   ```
+   *Cách dùng:* Kéo chuột chọn vùng cần nhận dạng, bấm **Enter/Space** để lưu vào `config/roi.yaml`, bấm **C** để chọn lại, hoặc **Q/Esc** để thoát.
+
+2. **Chạy nhận dạng có ROI:**
+   Mặc định `run_webcam.py` và `demo.py` sẽ tự động tải `config/roi.yaml` nếu tồn tại. Nếu bạn muốn tạm thời tắt vùng ROI và chạy trên toàn bộ khung hình, hãy truyền thêm tham số `--no-roi`:
+   ```bash
+   python scripts/run_webcam.py --no-roi
+   ```
 
 ## Train YOLO
 

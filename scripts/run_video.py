@@ -1,20 +1,18 @@
 """
-Vietnam License Plate Recognition - Test with Video File
-=========================================================
-Architecture:
-    Main thread  → YOLO tracking on EVERY frame  (ByteTrack + local yaml)
-                 → merges OCR cache + PlateTracker temporal voting (stable text)
-    OCR thread   → reads plate text only for NEW / SHARPER crops
-                 → caches per track ID; smoothing hides jitter when reads disagree
+Nhận Dạng Biển Số Xe Việt Nam - Phân Tích Video (Chế Độ Cổng)
+==============================================================
+Kiến trúc:
+    Luồng chính → YOLO detection → PaddleOCR (đồng bộ) → Kiểm tra cooldown.
+    Không tracking, không hàng đợi bất đồng bộ. Phù hợp cho xe chạy chậm hoặc đứng yên tại cổng.
 
-Usage (from repo root):
+Cách dùng (từ thư mục gốc dự án):
     python scripts/run_video.py --video path/to/video.mp4
     python scripts/run_video.py --video video.mp4 --output result.mp4 --max-frames 500
     python scripts/run_video.py --video video.mp4 --conf 0.4
 
-Hotkeys (in the preview window):
-    q  - Quit early
-    s  - Save current frame as JPEG → captures/
+Phím tắt (trong cửa sổ xem):
+    q  - Thoát sớm
+    s  - Lưu frame hiện tại dạng JPEG → thư mục captures/
 """
 
 from pathlib import Path
@@ -26,25 +24,16 @@ if str(ROOT) not in sys.path:
 
 import os
 import time
-import queue
-import threading
+import logging
 import argparse
 import cv2
 
 from lpr_pipeline import (
     LicensePlateRecognizer,
-    TrackedPlateCache,
-    PlateTracker,
-    prepare_plate_recognitions,
     find_best_model,
-    ocr_worker,
-    MIN_BLUR_SCORE,
-    OCR_QUEUE_MAXSIZE,
-    SMOOTH_WINDOW,
-    SMOOTH_MIN_VOTES,
-    SMOOTH_STALE_FRAMES,
 )
 
+logger = logging.getLogger("lpr.video")
 CAPTURE_DIR = ROOT / "captures"
 
 
@@ -52,7 +41,7 @@ def run_video(recognizer, video_path, output_path=None,
               max_frames=None, preview=True):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[ERROR] Cannot open video: {video_path}")
+        logger.error(f"Không thể mở video: {video_path}")
         return
 
     fps = int(cap.get(cv2.CAP_PROP_FPS)) or 25
@@ -61,33 +50,20 @@ def run_video(recognizer, video_path, output_path=None,
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     limit = max_frames if max_frames else total
 
-    print(f"Video : {w}x{h}  {fps} FPS  {total} frames total")
-    print(f"Processing up to {limit} frames...")
+    logger.info(f"Video: {w}x{h}  {fps} FPS  tổng {total} frame")
+    logger.info(f"Xử lý tối đa {limit} frame...")
 
     writer = None
     if output_path:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
 
-    plate_cache = TrackedPlateCache(expire_seconds=5.0)
-    plate_tracker = PlateTracker(
-        window=SMOOTH_WINDOW,
-        min_votes=SMOOTH_MIN_VOTES,
-        stale_limit=SMOOTH_STALE_FRAMES,
-    )
-
-    ocr_q = queue.Queue(maxsize=OCR_QUEUE_MAXSIZE)
-    stop_event = threading.Event()
-    worker = threading.Thread(
-        target=ocr_worker,
-        args=(recognizer, plate_cache, ocr_q, stop_event),
-        daemon=True,
-    )
-    worker.start()
-
     frame_count = 0
     fps_counter, fps_start = 0, time.time()
     current_fps = 0.0
+
+    cooldown_cache = {}
+    COOLDOWN_SECONDS = 5.0
 
     while frame_count < limit:
         ret, frame = cap.read()
@@ -95,30 +71,21 @@ def run_video(recognizer, video_path, output_path=None,
             break
 
         frame_count += 1
+        now = time.time()
 
-        tracking = recognizer.track_frame(frame, imgsz=480)
+        # Dọn cooldown đã hết hạn
+        cooldown_cache = {k: v for k, v in cooldown_cache.items() if now - v < COOLDOWN_SECONDS}
 
-        for plate in tracking["plates"]:
-            tid = plate["track_id"]
-            blur = plate["blur_score"]
-            plate_cache.mark_seen(tid)
+        # Nhận dạng đồng bộ
+        recognitions = recognizer.recognize(frame)
+        output_frame = recognizer.draw_results(frame, recognitions)
 
-            if blur < MIN_BLUR_SCORE:
-                continue
-
-            if plate_cache.needs_ocr(tid, blur):
-                try:
-                    ocr_q.put_nowait((tid, plate["crop"].copy(), blur))
-                except queue.Full:
-                    pass
-
-        if frame_count % 90 == 0:
-            plate_cache.cleanup()
-
-        recs = prepare_plate_recognitions(tracking, plate_cache)
-        smoothed = plate_tracker.update(recs)
-        output_frame = recognizer.draw_tracked_results(
-            frame, tracking, smoothed)
+        for rec in recognitions:
+            if rec["is_valid"] and rec["ocr_conf"] > 0.8:
+                text = rec["text"]
+                if text not in cooldown_cache:
+                    logger.info(f">>> [MO CONG] Phat hien bien so hop le: {text} (Do tu tin: {rec['ocr_conf']:.0%})")
+                    cooldown_cache[text] = now
 
         fps_counter += 1
         if fps_counter >= 30:
@@ -135,59 +102,63 @@ def run_video(recognizer, video_path, output_path=None,
             writer.write(output_frame)
 
         if preview:
-            cv2.imshow("Vietnam LPR - Video  (Q: Quit, S: Save)", output_frame)
+            cv2.imshow("Nhan Dang Bien So - Phan Tich Video  (Q: Thoat, S: Luu)", output_frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
-                print("Stopped early by user.")
+                logger.info("Người dùng dừng sớm.")
                 break
             elif key == ord("s"):
                 CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
                 save_path = CAPTURE_DIR / f"capture_{frame_count}.jpg"
                 cv2.imwrite(str(save_path), output_frame)
-                print(f"Saved: {save_path}")
+                logger.info(f"Đã lưu: {save_path}")
 
         if frame_count % 50 == 0:
-            print(f"  Processed {frame_count}/{limit} frames ...")
+            logger.info(f"  Đã xử lý {frame_count}/{limit} frame ...")
 
-    stop_event.set()
-    ocr_q.put(None)
-    worker.join(timeout=2)
     cap.release()
     if writer:
         writer.release()
-        print(f"[DONE] Annotated video saved to: {output_path}")
+        logger.info(f"Video đã chú thích lưu tại: {output_path}")
     if preview:
         cv2.destroyAllWindows()
 
-    print(f"Finished. Total frames processed: {frame_count}")
+    logger.info(f"Hoàn tất. Tổng số frame đã xử lý: {frame_count}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test Vietnamese LPR on a video file"
+        description="Phân tích video nhận dạng biển số xe Việt Nam (Chế Độ Cổng)"
     )
     parser.add_argument("--video",      required=True,
-                        help="Path to input video file")
+                        help="Đường dẫn file video đầu vào")
     parser.add_argument("--output",     default=None,
-                        help="Path to save annotated video (optional)")
+                        help="Đường dẫn lưu video đã chú thích (tùy chọn)")
     parser.add_argument("--model",      default=None,
-                        help="Path to .pt model file")
+                        help="Đường dẫn file model .pt")
     parser.add_argument("--conf",       type=float, default=0.5,
-                        help="Detection confidence threshold")
+                        help="Ngưỡng confidence detection")
     parser.add_argument("--gpu",        action="store_true",
-                        help="Use GPU for PaddleOCR (default: CPU)")
+                        help="Dùng GPU cho YOLO (PaddleOCR luôn CPU)")
     parser.add_argument("--max-frames", type=int,   default=None,
-                        help="Maximum number of frames to process")
+                        help="Số frame tối đa cần xử lý")
     parser.add_argument("--no-preview", action="store_true",
-                        help="Disable live preview window")
+                        help="Tắt cửa sổ xem trực tiếp")
     args = parser.parse_args()
 
     model_path = args.model or find_best_model()
     if not model_path or not os.path.exists(model_path):
         print(
-            "[ERROR] Model file not found. Place weights under weights/ "
-            "or pass --model path/to/best.pt")
+            "[LỖI] Không tìm thấy file model. Đặt weights vào thư mục weights/ "
+            "hoặc truyền --model path/to/best.pt")
         return
+
+    # ── Cấu hình logging ──
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     recognizer = LicensePlateRecognizer(
         model_path, confidence_threshold=args.conf, use_gpu=args.gpu)
