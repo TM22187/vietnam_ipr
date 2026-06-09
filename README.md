@@ -6,7 +6,7 @@ YOLOv8 (detect + track xe / biển) + PaddleOCR đọc biển Việt Nam. Video/
 
 ```
 vietnam_ipr/
-├── lpr_pipeline.py       # Core: YOLO, OCR, PlateTracker, vẽ kết quả
+├── lpr_pipeline.py       # Core: YOLO, OCR, xử lý ROI, vẽ kết quả
 ├── requirements.txt
 ├── README.md
 ├── config/

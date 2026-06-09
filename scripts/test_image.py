@@ -27,7 +27,7 @@ def test_with_image(recognizer, image_path):
         print(f"[LỖI] Không thể đọc ảnh: {image_path}")
         return
 
-    # Tự thu nhỏ nếu ảnh quá lớn — YOLO detect tốt nhất khi object chiếm 5-30% frame
+    # Tự thu nhỏ nếu ảnh quá lớn để giảm tải và giữ kích thước object ở mức dễ detect hơn
     h, w = frame.shape[:2]
     max_dim = 1280
     if max(h, w) > max_dim:

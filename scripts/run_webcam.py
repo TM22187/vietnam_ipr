@@ -76,10 +76,10 @@ def load_roi_from_yaml(path=None):
         return None
 
 
-# ─── Camera chạy trên luồng riêng, tự kết nối lại ─────────
+# Camera chạy trên luồng riêng, tự kết nối lại 
 
 class ThreadedCamera:
-    """Đọc camera ở một luồng ngầm để luôn lấy được khung hình mới nhất (Real-time 100%)
+    """Đọc camera ở một luồng ngầm để giảm delay và lấy khung hình mới nhất có thể.
        Tự kết nối lại khi camera mất kết nối."""
 
     MAX_RETRIES = 5
@@ -161,8 +161,7 @@ class ThreadedCamera:
             self.cap.release()
 
 
-# ─── Vòng lặp chính - Chế độ Snapshot ───────────────────────
-
+#  Vòng lặp chính - Chế độ Snapshot 
 def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
     cap = ThreadedCamera(camera_index)
     time.sleep(1.0)  # Đợi camera khởi động lên hình
@@ -188,7 +187,7 @@ def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
     OCR_CACHE_TTL = 60.0
     CACHE_CLEANUP_INTERVAL = 100  # mỗi 100 frame
 
-    # BƯỚC 1: KHỞI TẠO SỔ TAY COOLDOWN (Cấm đọc lại biển trùng trong 10 giây)
+    # BƯỚC 1: KHỞI TẠO COOLDOWN (tránh ghi nhận trùng cùng biển trong 10 giây)
     plate_cooldown = {}
     COOLDOWN_SECONDS = 10.0
 
@@ -212,7 +211,7 @@ def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
             h, w = frame.shape[:2]
             output = frame.copy()
 
-            # ── Dọn ocr_cache và cooldown định kỳ ──
+            # Dọn ocr_cache và cooldown định kỳ 
             if frame_count % CACHE_CLEANUP_INTERVAL == 0:
                 before = len(ocr_cache)
                 ocr_cache = {
@@ -223,10 +222,10 @@ def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
                 if before != after:
                     logger.debug(f"Dọn cache: {before} → {after} entries")
 
-                # BƯỚC 2: DỌN DẸP SỔ TAY COOLDOWN QUÁ HẠN
+                # BƯỚC 2: DỌN DẸP COOLDOWN QUÁ HẠN
                 plate_cooldown = {k: v for k, v in plate_cooldown.items() if now - v < COOLDOWN_SECONDS}
 
-            # ── Vẽ overlay vùng ROI ──
+            # Vẽ overlay vùng ROI 
             roi_px = recognizer.get_roi_pixels(w, h)
             if roi_px:
                 rx1, ry1, rx2, ry2 = roi_px
@@ -295,7 +294,7 @@ def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
                                 if valid or (len(text) >= 5 and ocr_conf > 0.6):
                                     last_seen = plate_cooldown.get(text, 0)
 
-                                    # Nếu đã qua 10 giây kể từ lần cuối đọc biển này → Cho phép ghi nhận
+                                    # Nếu đã qua 10 giây kể từ lần cuối ghi nhận biển này → cho phép ghi tiếp
                                     if now - last_seen > COOLDOWN_SECONDS:
                                         logger.info(f">>> [GHI NHAN] {text} ({ocr_conf:.0%})")
                                         plate_info = f"{text} ({ocr_conf:.0%})"
@@ -324,7 +323,7 @@ def run_webcam_snapshot(recognizer, camera_index=0, use_gpu=False):
             # 4. Vẽ Bảng Lịch sử 5 Biển Số
             # ---------------------------------------------------------
             panel_x = w - 260
-            cv2.putText(output, "5 BIEN SO GAN NHAT:", (panel_x, 30), font, 0.6, (0, 255, 255), 2)  # Không dấu vì OpenCV không hỗ trợ font Unicode
+            cv2.putText(output, "5 BIEN SO GAN NHAT:", (panel_x, 30), font, 0.6, (0, 255, 255), 2)  
 
             for i, p_info in enumerate(recent_plates):
                 y_pos = 60 + (i * 30)
@@ -359,7 +358,7 @@ def run_webcam_demo(recognizer, camera_index=0, use_gpu=False):
 
 
 def main():
-    # ── Cấu hình logging ──
+    #  Cấu hình logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

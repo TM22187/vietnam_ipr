@@ -31,7 +31,7 @@ PLATE_CLASS_ID = 2
 # Ngưỡng confidence OCR tối thiểu để chấp nhận kết quả
 MIN_OCR_CONFIDENCE = 0.0
 
-# Độ lệch chuẩn Laplacian tối thiểu để coi ảnh crop "đủ nét" cho OCR
+# Dự phòng cho kiểm tra độ nét bằng Laplacian nếu muốn bật lọc ảnh mờ về sau
 MIN_BLUR_SCORE = 50.0
 
 # Bảng hoán đổi ký tự OCR hay nhầm (áp dụng bên trong fix_ocr_mistakes).
@@ -167,10 +167,10 @@ def clean_plate_text(text):
 
 
 # ─────────────────────────────────────────────
-# LOGIC KIỂM TRA HỢP LỆ (TT 79/2024, TT 51/2025 & Thực tế)
+# LOGIC KIỂM TRA HỢP LỆ (format biển số Việt Nam + nới lỏng cho OCR thực tế)
 # ─────────────────────────────────────────────
 
-# Bảng chữ cái hợp lệ theo Luật (Bỏ I, O, Q, R, W)
+# Bảng chữ cái hợp lệ thường dùng trên biển số (bỏ I, O, Q, R, W để giảm nhầm OCR)
 _L = r"[ABCDEFGHKLMNPSTUVXYZ]"
 
 # Mã đặc biệt (LD, DA, MK...) và mã ngoại giao (NG, QT, CV, NN)
@@ -182,8 +182,8 @@ _ARMY = r"([ABHKQTPCV][A-Z])"
 
 def is_valid_vietnam_plate(text):
     """
-    Kiểm tra theo Thông tư 79/2024, Thông tư 51/2025 và thực tế lưu thông.
-    Bao gồm cơ chế "Nới lỏng" (Partial read) để không bỏ sót dữ liệu hiển thị.
+    Kiểm tra chuỗi OCR theo các mẫu biển số Việt Nam phổ biến.
+    Có cơ chế "nới lỏng" (partial read) để không bỏ sót kết quả OCR đủ dài.
     """
     text = re.sub(r"[^A-Z0-9]", "", text.upper())
 
@@ -202,11 +202,11 @@ def is_valid_vietnam_plate(text):
     # Trường hợp B: Xe Dân Sự / Nhà Nước / Ngoại Giao (bắt đầu bằng 2 số tỉnh 11-99)
     elif len(text) >= 6 and text[:2].isdigit() and 11 <= int(text[:2]) <= 99:
 
-        # B.1: Ô tô (1 chữ cái hợp lệ + 4 hoặc 5 số) — Ví dụ: 30A12345, 29A1234
+        # B.1: Ô tô (1 chữ cái hợp lệ + 4 đến 6 số) — Ví dụ: 30A12345, 29A1234
         if re.match(rf"^\d{{2}}{_L}\d{{4,6}}$", text):
             is_perfect_match = True
 
-        # B.2: Xe máy (2 chữ cái hợp lệ + 4 hoặc 5 số) — Ví dụ: 29AB12345
+        # B.2: Xe máy (2 chữ cái hợp lệ + 4 đến 6 số) — Ví dụ: 29AB12345
         elif re.match(rf"^\d{{2}}{_L}{{2}}\d{{4,6}}$", text):
             is_perfect_match = True
 
@@ -288,7 +288,7 @@ class LicensePlateRecognizer:
 
         logger.info("Đang tải PaddleOCR...")
         # PaddleOCR luôn chạy CPU — tránh conflict CUDA context với YOLO/PyTorch.
-        # enable_mkldnn=True bù lại bằng cách tăng tốc CPU Intel ~30-40%.
+        # MKL-DNN đang tắt để tránh crash ngầm trên một số máy Windows.
         self.ocr = PaddleOCR(
             lang="en",
             device="cpu",
