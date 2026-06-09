@@ -1,14 +1,18 @@
-# Vietnam LPR — dùng venv; sau khi cài xong: pip freeze > requirements-lock.txt
-# lpr_pipeline dùng API PaddleOCR 3.x (.predict, rec_texts). Nếu dùng 2.x thì cần sửa hàm read_plate_text.
+# Vietnam LPR dependencies.
+# After installing in a virtual environment, optionally run:
+# pip freeze > requirements-lock.txt
+#
+# lpr_pipeline.py uses the PaddleOCR 3.x API (.predict, rec_texts).
+# PaddleOCR 2.x requires changes in read_plate_text().
 
-# ── Phát hiện & huấn luyện ──────────────────────────────────
-ultralytics>=8.0,<9       # YOLOv8 (bao gồm cả torch khi chưa có)
-paddleocr>=3.0.0          # PaddleOCR đọc ký tự biển số
-paddlepaddle>=2.5.0       # Backend của PaddleOCR
+# Detection and training
+ultralytics>=8.0,<9       # YOLOv8, includes torch when it is not already installed
+paddleocr>=3.0.0          # OCR engine for reading license plate text
+paddlepaddle>=2.5.0       # PaddleOCR backend
 
-# ── Xử lý ảnh & hỗ trợ ─────────────────────────────────────
-opencv-python>=4.8        # Đọc ảnh, video, vẽ bounding box
-numpy>=1.24               # Tính toán mảng số
-pillow>=9.0               # Đọc/ghi ảnh (PIL) - dùng trong notebook & pipeline
-pyyaml>=6.0               # Đọc file config .yaml (data.yaml, roi.yaml)
-matplotlib>=3.7           # Hiển thị ảnh và biểu đồ trong notebook
+# Image processing and utilities
+opencv-python>=4.8        # Read images/video and draw bounding boxes
+numpy>=1.24               # Numeric arrays
+pillow>=9.0               # PIL image support for notebooks and pipeline helpers
+pyyaml>=6.0               # Read YAML config files
+matplotlib>=3.7           # Display images and charts in notebooks
