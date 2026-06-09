@@ -54,6 +54,28 @@ python scripts/run_video.py --video clip.mp4 --output out.mp4 --no-preview
 
 python scripts/test_image.py --image photo.jpg
 ```
+
+## Chạy desktop app
+
+```bash
+python app.py
+```
+
+App mở camera trực tiếp, hiển thị khung hình live và 5 biển số gần nhất. Có thể truyền tham số nếu cần:
+
+```bash
+python app.py --camera 1 --conf 0.25 --gpu
+python app.py --no-roi
+```
+
+Để đóng gói thành app Windows:
+
+```powershell
+.\scripts\build_windows_app.ps1
+```
+
+File chạy nằm ở `dist\VietnamLPR\VietnamLPR.exe`.
+
 ## Cấu hình Vùng nhận dạng (ROI)
 
 Để tối ưu hóa hiệu năng và tránh nhận dạng nhầm các biển số ở xa hoặc ngoài luồng xe, bạn có thể thiết lập vùng ROI (Region of Interest):

@@ -12,3 +12,4 @@ numpy>=1.24               # Tính toán mảng số
 pillow>=9.0               # Đọc/ghi ảnh (PIL) - dùng trong notebook & pipeline
 pyyaml>=6.0               # Đọc file config .yaml (data.yaml, roi.yaml)
 matplotlib>=3.7           # Hiển thị ảnh và biểu đồ trong notebook
+pyinstaller>=6.0          # Đóng gói app desktop thành file .exe trên Windows
