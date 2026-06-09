@@ -13,7 +13,6 @@ Cách dùng (dạng module):
 import os
 import re
 import glob
-import time
 import logging
 import cv2
 import numpy as np
@@ -164,6 +163,42 @@ def clean_plate_text(text):
     """Loại bỏ ký tự không phải chữ/số và áp dụng sửa lỗi OCR."""
     cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
     return fix_ocr_mistakes(cleaned)
+
+
+def _box_overlap_ratio(a, b):
+    ax1, ay1, ax2, ay2, _ = a
+    bx1, by1, bx2, by2, _ = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    return inter_area / max(1, min(area_a, area_b))
+
+
+def _merge_boxes(boxes, overlap_threshold=0.3):
+    merged = []
+    boxes = list(boxes)
+
+    while boxes:
+        base = boxes.pop(0)
+        i = 0
+        while i < len(boxes):
+            if _box_overlap_ratio(base, boxes[i]) <= overlap_threshold:
+                i += 1
+                continue
+
+            x1, y1, x2, y2, conf = boxes.pop(i)
+            bx1, by1, bx2, by2, base_conf = base
+            base = (
+                min(bx1, x1), min(by1, y1),
+                max(bx2, x2), max(by2, y2),
+                max(base_conf, conf),
+            )
+
+        merged.append(base)
+
+    return merged
 
 
 # ─────────────────────────────────────────────
@@ -342,6 +377,14 @@ class LicensePlateRecognizer:
             int(self.roi[2] * frame_w), int(self.roi[3] * frame_h),
         )
 
+    def _crop_plate(self, frame, bbox, pad=20):
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        return frame[
+            max(0, y1 - pad): min(h, y2 + pad),
+            max(0, x1 - pad): min(w, x2 + pad),
+        ]
+
     def detect_plates(self, frame):
         """
         Chạy YOLOv8 trên frame và trả về danh sách bounding box biển số.
@@ -353,43 +396,18 @@ class LicensePlateRecognizer:
         fh, fw = frame.shape[:2]
         results = self.yolo(frame, conf=self.conf_threshold, verbose=False)
         plates = []
+
         for result in results:
             for box in result.boxes:
                 if int(box.cls[0]) != self.plate_class_id:
                     continue
+
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                 conf = float(box.conf[0])
+                if self._is_inside_roi(x1, y1, x2, y2, fw, fh):
+                    plates.append((x1, y1, x2, y2, conf))
 
-                # ── Lọc ROI ──
-                if not self._is_inside_roi(x1, y1, x2, y2, fw, fh):
-                    continue
-
-                plates.append([x1, y1, x2, y2, conf])
-
-        # Gộp các box chồng lấp
-        merged = []
-        while plates:
-            base = plates.pop(0)
-            base_x1, base_y1, base_x2, base_y2, base_conf = base
-
-            i = 0
-            while i < len(plates):
-                x1, y1, x2, y2, conf = plates[i]
-                ix1, iy1 = max(base_x1, x1), max(base_y1, y1)
-                ix2, iy2 = min(base_x2, x2), min(base_y2, y2)
-                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                area1 = (base_x2 - base_x1) * (base_y2 - base_y1)
-                area2 = (x2 - x1) * (y2 - y1)
-                if inter_area > 0.3 * min(area1, area2):
-                    base_x1, base_y1 = min(base_x1, x1), min(base_y1, y1)
-                    base_x2, base_y2 = max(base_x2, x2), max(base_y2, y2)
-                    base_conf = max(base_conf, conf)
-                    plates.pop(i)
-                else:
-                    i += 1
-            merged.append((base_x1, base_y1, base_x2, base_y2, base_conf))
-
-        return merged
+        return _merge_boxes(plates)
 
     def ocr_plate_crop(self, crop):
         """
@@ -417,12 +435,9 @@ class LicensePlateRecognizer:
                 is_valid, plate_crop
         """
         recognitions = []
-        h, w = frame.shape[:2]
 
         for (x1, y1, x2, y2, det_conf) in self.detect_plates(frame):
-            pad = 20
-            crop = frame[max(0, y1 - pad): min(h, y2 + pad),
-                         max(0, x1 - pad): min(w, x2 + pad)]
+            crop = self._crop_plate(frame, (x1, y1, x2, y2))
             if crop.size == 0:
                 continue
 
