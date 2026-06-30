@@ -5,6 +5,7 @@ __pycache__/
 .venv-app/
 .venv-build/
 .build/
+edge_cpp/build*/
 dist/
 .ipynb_checkpoints/
 
@@ -32,6 +33,7 @@ dataset/
 *.onnx
 !models/
 !models/best_vietnam_lpr.onnx
+!edge_cpp/models/PP-OCRv6_rec_small.onnx
 *.mp4
 *.avi
 *.jpg

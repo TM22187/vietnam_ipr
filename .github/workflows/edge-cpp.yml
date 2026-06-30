@@ -1,0 +1,55 @@
+name: Edge C++ quality gate
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    paths:
+      - "edge_cpp/**"
+      - "models/best_vietnam_lpr.onnx"
+      - ".github/workflows/edge-cpp.yml"
+  pull_request:
+    paths:
+      - "edge_cpp/**"
+      - "models/best_vietnam_lpr.onnx"
+      - ".github/workflows/edge-cpp.yml"
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ORT_VERSION: "1.27.0"
+      ONNXRUNTIME_ROOT: ${{ github.workspace }}/.deps/onnxruntime
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenCV development files
+        run: sudo apt-get update && sudo apt-get install -y libopencv-dev
+      - name: Download pinned ONNX Runtime SDK
+        run: |
+          mkdir -p .deps
+          curl --fail --location --retry 3 \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+            --output .deps/onnxruntime.tgz
+          tar -xzf .deps/onnxruntime.tgz -C .deps
+          mv ".deps/onnxruntime-linux-x64-${ORT_VERSION}" "${ONNXRUNTIME_ROOT}"
+      - name: Configure
+        run: >-
+          cmake -S edge_cpp -B edge_cpp/build
+          -DCMAKE_BUILD_TYPE=Release
+          -DONNXRUNTIME_ROOT="${ONNXRUNTIME_ROOT}"
+          -DVLPR_WARNINGS_AS_ERRORS=ON
+      - name: Build and test
+        run: |
+          cmake --build edge_cpp/build --parallel 2
+          ctest --test-dir edge_cpp/build --output-on-failure
+      - name: Load production models
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/.deps/onnxruntime/lib
+        run: ./edge_cpp/build/vlpr_edge --dry-run
+      - name: Build deployment archive
+        run: cpack --config edge_cpp/build/CPackConfig.cmake -G TGZ
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vietnam-lpr-edge-linux-x64
+          path: vietnam-lpr-edge-*.tar.gz
+          if-no-files-found: error

@@ -1,0 +1,26 @@
+[Unit]
+Description=Vietnam License Plate Recognition Edge Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vlpr
+Group=video
+WorkingDirectory=/var/lib/vietnam-lpr-edge
+ExecStart=/usr/bin/vlpr_edge --source 0 --threads 2 --event-log /var/lib/vietnam-lpr-edge/events.jsonl
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vietnam-lpr-edge
+DevicePolicy=closed
+DeviceAllow=/dev/video0 rw
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

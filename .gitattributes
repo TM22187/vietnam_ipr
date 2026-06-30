@@ -1,0 +1,4 @@
+*.onnx binary
+edge_cpp/models/ppocrv6_chars.txt text eol=lf
+edge_cpp/scripts/*.sh text eol=lf
+edge_cpp/systemd/*.service text eol=lf
