@@ -60,6 +60,34 @@ if(VLPR_BUILD_RUNTIME)
     target_compile_definitions(vlpr_edge PRIVATE VLPR_VERSION="${PROJECT_VERSION}")
     vlpr_apply_warnings(vlpr_edge)
 
+    if(WIN32)
+        find_file(ONNXRUNTIME_DLL NAMES onnxruntime.dll
+            HINTS ${ONNXRUNTIME_ROOT} PATH_SUFFIXES lib bin)
+        get_filename_component(OPENCV_RUNTIME_DIR "${OpenCV_DIR}/../bin" ABSOLUTE)
+        file(GLOB OPENCV_RUNTIME_DLLS
+            "${OPENCV_RUNTIME_DIR}/opencv_world*.dll"
+            "${OPENCV_RUNTIME_DIR}/opencv_videoio_ffmpeg*.dll")
+        if(NOT ONNXRUNTIME_DLL)
+            message(FATAL_ERROR "onnxruntime.dll was not found under ONNXRUNTIME_ROOT")
+        endif()
+        add_custom_command(TARGET vlpr_edge POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_DLL}" "$<TARGET_FILE_DIR:vlpr_edge>")
+        foreach(OPENCV_RUNTIME_DLL IN LISTS OPENCV_RUNTIME_DLLS)
+            add_custom_command(TARGET vlpr_edge POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${OPENCV_RUNTIME_DLL}" "$<TARGET_FILE_DIR:vlpr_edge>")
+        endforeach()
+        install(FILES ${ONNXRUNTIME_DLL} ${OPENCV_RUNTIME_DLLS} DESTINATION bin)
+    elseif(UNIX)
+        file(GLOB ONNXRUNTIME_SHARED_LIBRARIES "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so*")
+        if(NOT ONNXRUNTIME_SHARED_LIBRARIES)
+            message(FATAL_ERROR "ONNX Runtime shared libraries were not found under ONNXRUNTIME_ROOT/lib")
+        endif()
+        set_target_properties(vlpr_edge PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+        install(FILES ${ONNXRUNTIME_SHARED_LIBRARIES} DESTINATION lib)
+    endif()
+
     install(TARGETS vlpr_edge RUNTIME DESTINATION bin)
     install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../models/best_vietnam_lpr.onnx

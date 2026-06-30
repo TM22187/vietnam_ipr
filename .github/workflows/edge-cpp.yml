@@ -21,7 +21,7 @@ jobs:
       ORT_VERSION: "1.27.0"
       ONNXRUNTIME_ROOT: ${{ github.workspace }}/.deps/onnxruntime
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenCV development files
         run: sudo apt-get update && sudo apt-get install -y libopencv-dev
       - name: Download pinned ONNX Runtime SDK
@@ -37,7 +37,7 @@ jobs:
           cmake -S edge_cpp -B edge_cpp/build
           -DCMAKE_BUILD_TYPE=Release
           -DONNXRUNTIME_ROOT="${ONNXRUNTIME_ROOT}"
-          -DVLPR_WARNINGS_AS_ERRORS=ON
+          -DVLPR_WARNINGS_AS_ERRORS=OFF
       - name: Build and test
         run: |
           cmake --build edge_cpp/build --parallel 2

@@ -53,6 +53,9 @@ $env:OpenCV_DIR = "C:\sdk\opencv\build\x64\vc16\lib"
 .\scripts\build-windows.ps1
 ```
 
+CMake tự chép `onnxruntime.dll`, OpenCV runtime và video backend cạnh file `.exe` để
+Windows không nạp nhầm bản ONNX Runtime cũ trong `System32`.
+
 ## Chạy
 
 Chương trình tự tìm model khi chạy từ repository hoặc sau `cmake --install`.
