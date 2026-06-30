@@ -42,6 +42,16 @@ def _resource_roots() -> list[Path]:
     return roots
 
 
+def find_resource(relative_path: str | Path) -> str | None:
+    """Tìm resource trong source tree hoặc bundle PyInstaller."""
+    relative = Path(relative_path)
+    for root in _resource_roots():
+        candidate = root / relative
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_best_model() -> str | None:
     """Tìm model ONNX được đóng gói hoặc model trong workspace."""
     relative_candidates = (
@@ -49,11 +59,10 @@ def find_best_model() -> str | None:
         Path("weights/best_vietnam_lpr.onnx"),
         Path("runs/detect/vietnam_lpr/yolov8_local/weights/best.onnx"),
     )
-    for root in _resource_roots():
-        for relative in relative_candidates:
-            candidate = root / relative
-            if candidate.is_file():
-                return str(candidate)
+    for relative in relative_candidates:
+        candidate = find_resource(relative)
+        if candidate:
+            return candidate
     return None
 
 
@@ -126,6 +135,10 @@ class OnnxPlateDetector:
         self.input_size = int(self.input.shape[-1])
         self.confidence = confidence
         self.class_names = self._read_class_names()
+        if self.input_size <= 0 or len(self.input.shape) != 4:
+            raise RuntimeError(f"Input model không hợp lệ: {self.input.shape}")
+        if self.class_names.get(PLATE_CLASS_ID) != "plate":
+            raise RuntimeError("Model không chứa class 'plate' tại index 2")
 
     def _read_class_names(self) -> dict[int, str]:
         raw = self.session.get_modelmeta().custom_metadata_map.get("names", "")
@@ -136,6 +149,8 @@ class OnnxPlateDetector:
             return {PLATE_CLASS_ID: "plate"}
 
     def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int, float]]:
+        if frame is None or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
+            raise ValueError("Frame đầu vào phải là ảnh BGR 3 kênh hợp lệ")
         image, scale, pad_x, pad_y = _letterbox(frame, self.input_size)
         tensor = cv2.dnn.blobFromImage(
             image, scalefactor=1.0 / 255.0, size=(self.input_size, self.input_size),
@@ -145,6 +160,8 @@ class OnnxPlateDetector:
         prediction = np.squeeze(output, axis=0)
         if prediction.shape[0] < prediction.shape[1]:
             prediction = prediction.T
+        if prediction.ndim != 2 or prediction.shape[1] <= 4 + PLATE_CLASS_ID:
+            raise RuntimeError(f"Output model không đúng schema YOLOv8: {prediction.shape}")
 
         class_scores = prediction[:, 4:]
         class_ids = np.argmax(class_scores, axis=1)
@@ -338,6 +355,13 @@ class LicensePlateRecognizer:
                 events.append(item.copy())
                 self._recent[track.text] = now
 
+        # Giữ track bị hụt detection trong thời gian ngắn để không OCR lại ngay
+        # khi detector bỏ sót một frame.
+        active_ids = {id(track) for track in active_tracks}
+        active_tracks.extend(
+            track for track in self._tracks
+            if id(track) not in active_ids and now - track.last_seen < 1.5
+        )
         self._tracks = active_tracks
         self._recent = {text: seen for text, seen in self._recent.items() if now - seen < 60.0}
         return self.draw_results(frame, results), results, events

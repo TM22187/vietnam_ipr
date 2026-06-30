@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "model": "best_vietnam_lpr.onnx",
+  "sha256": "8893a6333e6fda86a47cc36294a40a9c26422e71f42de75f0046d9f0c7a986e4",
+  "input": [1, 3, 640, 640],
+  "classes": {
+    "0": "car",
+    "1": "motorcycle",
+    "2": "plate"
+  },
+  "runtime": "onnxruntime-cpu"
+}
