@@ -224,7 +224,16 @@ class OnnxPlateOCR:
     def read(self, crop: np.ndarray) -> tuple[str, float, str, bool]:
         if crop.size == 0:
             return "", 0.0, "", False
-        result = self.engine(_preprocess_plate(crop), use_det=True, use_cls=False, use_rec=True)
+        # Biển dài một dòng đã được YOLO crop chính xác: bỏ text-detector giúp
+        # OCR nhanh hơn nhiều mà giữ nguyên kết quả. Biển vuông/hai dòng vẫn
+        # chạy detector để bảo toàn thứ tự và độ chính xác.
+        aspect_ratio = crop.shape[1] / max(1, crop.shape[0])
+        result = self.engine(
+            _preprocess_plate(crop),
+            use_det=aspect_ratio < 1.75,
+            use_cls=False,
+            use_rec=True,
+        )
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         if not texts:
