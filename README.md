@@ -1,86 +1,47 @@
-# Vietnam LPR
+# Vietnam LPR Desktop
 
-YOLOv8 (detect + track xe / biển) + PaddleOCR đọc biển Việt Nam. Video/webcam có OCR nền và làm mượt chữ theo thời gian.
+Ứng dụng Windows nhận dạng biển số xe Việt Nam từ **ảnh, video hoặc camera**.
+Toàn bộ xử lý chạy offline trên CPU; giao diện không có ROI và không cần mở
+terminal.
 
-## Cấu trúc thư mục
+## Điểm chính
 
-```
-vietnam_ipr/
-├── lpr_pipeline.py       # Core: YOLO, OCR, xử lý ROI, vẽ kết quả
-├── requirements.txt
-├── README.md
-├── config/
-│   ├── bytetrack_lpr.yaml    # Tracker (traffic-friendly)
-│   ├── data.yaml             # Train từ root: yolo detect train data=config/data.yaml ...
-│   └── roi.yaml              # Vùng nhận dạng ROI (tùy chọn, gitignored)
-├── scripts/
-│   ├── run_webcam.py
-│   ├── run_video.py
-│   ├── test_image.py
-│   └── set_roi.py            # Công cụ chọn vùng ROI tương tác
-├── weights/
-│   ├── best_vietnam_lpr.pt   # Put trained weights here (ưu tiên khi không truyền --model)
-│   └── pretrained/           # yolov8s.pt / yolo26n.pt (train & notebook)
-├── dataset/
-│   └── data.yaml               # Train khi cwd là trong dataset/
-├── notebooks/
-│   └── vietnam_lpr_training.ipynb
-├── captures/                   # Ảnh khi bấm 's' trong webcam/video (gitignored)
-├── docs/                       # Tài liệu tùy chọn
-└── runs/                       # Ultralytics training outputs (gitignored)
+- GUI desktop đơn giản, có preview và lịch sử biển số.
+- YOLOv8 ONNX + RapidOCR ONNX; không còn PyTorch, Ultralytics, PaddlePaddle.
+- Cache theo vị trí khi chạy video/camera để không OCR lặp lại mỗi frame.
+- Camera luôn lấy frame mới nhất, hạn chế độ trễ.
+- Có cấu hình PyInstaller và Inno Setup để tạo file cài đặt Windows.
+
+## Chạy từ mã nguồn
+
+Yêu cầu Windows 10/11 64-bit và Python 3.12 hoặc 3.13 có Tcl/Tk.
+
+```powershell
+python -m venv .venv-app
+.\.venv-app\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-app\Scripts\python.exe desktop_app.py
 ```
 
-## Cài đặt
+Model bắt buộc nằm tại `models/best_vietnam_lpr.onnx`.
 
-```bash
-cd vietnam_ipr
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-pip install -r requirements.txt
+## Build app và installer
+
+```powershell
+.\build_app.ps1
 ```
 
-Cần file **`weights/best_vietnam_lpr.pt`** (hoặc truyền `--model`). PaddleOCR 3.x khớp API trong code (xem comment trong `requirements.txt`).
+Kết quả:
 
-## Chạy inference
+- App portable: `dist\VietnamLPR\VietnamLPR.exe`
+- Installer (nếu máy có Inno Setup 6): `dist\installer\VietnamLPR-Setup-1.0.0.exe`
 
-Luôn có thể chạy từ **thư mục gốc project** (`vietnam_ipr/`):
+Installer cài theo tài khoản người dùng nên không yêu cầu quyền Administrator.
 
-```bash
-python scripts/run_webcam.py
-python scripts/run_webcam.py --conf 0.25 --gpu
+## Kiểm thử
 
-python scripts/run_video.py --video path/to/video.mp4
-python scripts/run_video.py --video clip.mp4 --output out.mp4 --no-preview
-
-python scripts/test_image.py --image photo.jpg
+```powershell
+.\.venv-app\Scripts\python.exe -m unittest discover -s tests -v
 ```
-## Cấu hình Vùng nhận dạng (ROI)
 
-Để tối ưu hóa hiệu năng và tránh nhận dạng nhầm các biển số ở xa hoặc ngoài luồng xe, bạn có thể thiết lập vùng ROI (Region of Interest):
-
-1. **Thiết lập ROI tương tác:**
-   ```bash
-   python scripts/set_roi.py
-   # Hoặc dùng camera/video khác:
-   python scripts/set_roi.py --camera 1
-   python scripts/set_roi.py --video path/to/video.mp4
-   ```
-   *Cách dùng:* Kéo chuột chọn vùng cần nhận dạng, bấm **Enter/Space** để lưu vào `config/roi.yaml`, bấm **C** để chọn lại, hoặc **Q/Esc** để thoát.
-
-2. **Chạy nhận dạng có ROI:**
-   Mặc định `run_webcam.py` và `demo.py` sẽ tự động tải `config/roi.yaml` nếu tồn tại. Nếu bạn muốn tạm thời tắt vùng ROI và chạy trên toàn bộ khung hình, hãy truyền thêm tham số `--no-roi`:
-   ```bash
-   python scripts/run_webcam.py --no-roi
-   ```
-
-## Train YOLO
-
-- **Notebook:** mở `notebooks/vietnam_lpr_training.ipynb`, chạy lần lượt các ô (ô cấu hình dataset sẽ neo `cwd` về root và tìm `dataset/`).
-- **CLI từ root:** `yolo detect train data=config/data.yaml model=yolov8s.pt ...`
-
-Sau train, notebook/script copy **`best.pt` → `weights/best_vietnam_lpr.pt`** để scripts inference tự tìm.
-
-## Ghi chú
-
-- `find_best_model()` tìm theo thứ tự: `weights/best_vietnam_lpr.pt`, root legacy, `runs/detect/**/best.pt`.
-- Biến môi trường (tùy máy): `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True` nếu Paddle treo khi check mạng lần đầu.
+Notebook train và cấu hình dataset được giữ lại để có thể huấn luyện model mới.
+Các script CLI/OpenCV cũ đã được loại bỏ vì trùng chức năng với app.

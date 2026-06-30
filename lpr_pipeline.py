@@ -1,482 +1,361 @@
-"""
-Nhận Dạng Biển Số Xe Việt Nam - Pipeline Cốt Lõi
+"""Core nhận dạng biển số tối ưu cho ứng dụng desktop.
 
-Cung cấp các hàm hỗ trợ OCR và class LicensePlateRecognizer
-kết hợp YOLOv8 (phát hiện) + PaddleOCR (đọc ký tự).
-
-Cách dùng (dạng module):
-    from lpr_pipeline import LicensePlateRecognizer
-    recognizer = LicensePlateRecognizer("weights/best_vietnam_lpr.pt")
-    results = recognizer.recognize(frame)
+Detector YOLOv8 và OCR đều chạy bằng ONNX Runtime trên CPU. Ứng dụng không
+phụ thuộc PyTorch/PaddlePaddle và không có khái niệm ROI.
 """
 
+from __future__ import annotations
+
+import ast
 import os
 import re
-import glob
+import sys
 import time
-import logging
+from dataclasses import dataclass
+from pathlib import Path
+
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
-from ultralytics import YOLO
+import onnxruntime as ort
+from rapidocr import RapidOCR
 
-logger = logging.getLogger("lpr")
 
-# Thư mục gốc của dự án (thư mục chứa file này)
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-
-# ID class biển số trong dataset (0=ô tô, 1=xe máy, 2=biển số)
 PLATE_CLASS_ID = 2
+DEFAULT_CONFIDENCE = 0.30
 
-# Ngưỡng confidence OCR tối thiểu để chấp nhận kết quả
-MIN_OCR_CONFIDENCE = 0.0
-
-# Dự phòng cho kiểm tra độ nét bằng Laplacian nếu muốn bật lọc ảnh mờ về sau
-MIN_BLUR_SCORE = 50.0
-
-# Bảng hoán đổi ký tự OCR hay nhầm (áp dụng bên trong fix_ocr_mistakes).
-_OCR_LETTER_AS_DIGIT = {
-    "A": "4", "B": "8", "D": "0", "G": "6",
-    "I": "1", "L": "1", "O": "0", "Q": "0",
-    "S": "5", "T": "7", "U": "0", "Z": "2",
+_LETTER_AS_DIGIT = {
+    "A": "4", "B": "8", "D": "0", "G": "6", "I": "1", "L": "1",
+    "O": "0", "Q": "0", "S": "5", "T": "7", "U": "0", "Z": "2",
 }
-_OCR_DIGIT_AS_LETTER = {
-    "0": "O", "1": "I", "2": "Z", "4": "A",
-    "5": "S", "6": "G", "7": "T", "8": "B",
+_DIGIT_AS_LETTER = {
+    "0": "O", "1": "I", "2": "Z", "4": "A", "5": "S", "6": "G",
+    "7": "T", "8": "B",
 }
 
 
-def _sharpen(img):
-    """Làm sắc nét ảnh bằng Unsharp-mask để cạnh ký tự rõ hơn."""
-    blur = cv2.GaussianBlur(img, (0, 0), 3)
-    return cv2.addWeighted(img, 1.5, blur, -0.5, 0)
+def _resource_roots() -> list[Path]:
+    roots: list[Path] = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)))
+        roots.append(Path(sys.executable).parent)
+    roots.append(Path(__file__).resolve().parent)
+    return roots
 
 
-def preprocess_plate(plate_img):
-    h, w = plate_img.shape[:2]
-
-    # 1. Bỏ qua deskew vì camera cổng thường cố định góc chụp
-
-    # --- Thu nhỏ ảnh để tiết kiệm CPU ---
-    # Ảnh gốc khoảng 120-160px là đủ để OCR đọc nét.
-    # Phóng to lên 320px khiến CPU tính gấp 4 lần không cần thiết!
-    target_w = 160  # Thay vì max(w, 320)
-
-    # Dùng INTER_AREA khi thu nhỏ cho chất lượng tốt hơn INTER_CUBIC
-    plate_img = cv2.resize(plate_img, (target_w, int(h * target_w / w)),
-                           interpolation=cv2.INTER_AREA)
-
-    # 2. Thêm viền đen xung quanh (tránh ký tự sát mép bị cắt)
-    pad_b = int(target_w * 0.05)
-    plate_img = cv2.copyMakeBorder(plate_img, pad_b, pad_b, pad_b, pad_b,
-                                   cv2.BORDER_CONSTANT, value=[0, 0, 0])
-
-    # 3. Cân bằng histogram cục bộ (CLAHE) + làm sắc nét
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-    sharpened = _sharpen(plate_img)
-    gray_sharp = cv2.cvtColor(sharpened, cv2.COLOR_BGR2GRAY)
-    v1 = cv2.cvtColor(clahe.apply(gray_sharp), cv2.COLOR_GRAY2BGR)
-
-    return [v1]
-
-
-def read_plate_text(ocr_engine, plate_img):
-    """
-    Đọc text từ ảnh crop biển số bằng PaddleOCR.
-    Thử nhiều phiên bản tiền xử lý, trả về kết quả có confidence cao nhất.
-
-    Tham số:
-        ocr_engine: Instance PaddleOCR
-        plate_img:  numpy array (BGR)
-
-    Trả về:
-        tuple (text: str, confidence: float)
-    """
-    best_text = ""
-    best_conf = 0.0
-
-    for img_bgr in preprocess_plate(plate_img):
-        try:
-            result = ocr_engine.predict(img_bgr)
-        except Exception as e:
-            print(f"[Cảnh báo OCR] {e}")
-            continue
-
-        if not result or not result[0]:
-            continue
-
-        res = result[0]
-        texts = res.get("rec_texts", [])
-        confs = res.get("rec_scores", [])
-
-        if not texts:
-            continue
-
-        text = " ".join(texts).upper().strip()
-        conf = float(np.mean(confs)) if confs else 0.0
-
-        if conf > best_conf:
-            best_text = text
-            best_conf = conf
-
-    return best_text, best_conf
-
-
-def fix_ocr_mistakes(text):
-    """
-    Sửa lỗi OCR theo quy tắc dựa trên cấu trúc biển số Việt Nam
-    (mã tỉnh là chữ số, ký tự sê-ri là chữ cái, phần số cuối là chữ số).
-    """
-    if len(text) < 7:
-        return text
-
-    chars = list(text)
-
-    # Vị trí 0-1: phải là SỐ (mã tỉnh)
-    for i in range(min(2, len(chars))):
-        if chars[i] in _OCR_LETTER_AS_DIGIT:
-            chars[i] = _OCR_LETTER_AS_DIGIT[chars[i]]
-
-    # Vị trí 2: phải là CHỮ CÁI (ký tự sê-ri)
-    if len(chars) > 2 and chars[2] in _OCR_DIGIT_AS_LETTER:
-        chars[2] = _OCR_DIGIT_AS_LETTER[chars[2]]
-
-    if len(chars) > 3:
-        if len(chars) >= 9:
-            # Biển 9 ký tự: vị trí 3 có thể là chữ O trong sê-ri đặc biệt
-            if chars[3] == "0":
-                chars[3] = "O"
-            start_digit = 4
-        else:
-            if chars[3] in _OCR_LETTER_AS_DIGIT:
-                chars[3] = _OCR_LETTER_AS_DIGIT[chars[3]]
-            start_digit = 3
-
-        # Phần số cuối: phải là CHỮ SỐ
-        for i in range(start_digit, len(chars)):
-            if chars[i] in _OCR_LETTER_AS_DIGIT:
-                chars[i] = _OCR_LETTER_AS_DIGIT[chars[i]]
-
-    return "".join(chars)
-
-
-def clean_plate_text(text):
-    """Loại bỏ ký tự không phải chữ/số và áp dụng sửa lỗi OCR."""
-    cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
-    return fix_ocr_mistakes(cleaned)
-
-
-# ─────────────────────────────────────────────
-# LOGIC KIỂM TRA HỢP LỆ (format biển số Việt Nam + nới lỏng cho OCR thực tế)
-# ─────────────────────────────────────────────
-
-# Bảng chữ cái hợp lệ thường dùng trên biển số (bỏ I, O, Q, R, W để giảm nhầm OCR)
-_L = r"[ABCDEFGHKLMNPSTUVXYZ]"
-
-# Mã đặc biệt (LD, DA, MK...) và mã ngoại giao (NG, QT, CV, NN)
-_SPEC = r"(LD|DA|KT|CD|RM|HC|MK|TĐ|MĐ|CT|LB|R|NG|QT|CV|NN)"
-
-# Mã Quân đội bắt đầu bằng các chữ quy định
-_ARMY = r"([ABHKQTPCV][A-Z])"
-
-
-def is_valid_vietnam_plate(text):
-    """
-    Kiểm tra chuỗi OCR theo các mẫu biển số Việt Nam phổ biến.
-    Có cơ chế "nới lỏng" (partial read) để không bỏ sót kết quả OCR đủ dài.
-    """
-    text = re.sub(r"[^A-Z0-9]", "", text.upper())
-
-    # --- 1. LỌC RÁC: Dưới 4 ký tự chắc chắn là nhiễu → Loại bỏ ---
-    if len(text) < 4:
-        return False
-
-    # --- 2. KIỂM TRA CHUẨN FORMAT (Luật Mới + Luật Cũ) ---
-    is_perfect_match = False
-
-    # Trường hợp A: Xe Quân Đội (2 chữ cái quân đội + 4-5 số)
-    # Ví dụ: KP1234, TM12345
-    if re.match(rf"^{_ARMY}\d{{4,5}}$", text):
-        is_perfect_match = True
-
-    # Trường hợp B: Xe Dân Sự / Nhà Nước / Ngoại Giao (bắt đầu bằng 2 số tỉnh 11-99)
-    elif len(text) >= 6 and text[:2].isdigit() and 11 <= int(text[:2]) <= 99:
-
-        # B.1: Ô tô (1 chữ cái hợp lệ + 4 đến 6 số) — Ví dụ: 30A12345, 29A1234
-        if re.match(rf"^\d{{2}}{_L}\d{{4,6}}$", text):
-            is_perfect_match = True
-
-        # B.2: Xe máy (2 chữ cái hợp lệ + 4 đến 6 số) — Ví dụ: 29AB12345
-        elif re.match(rf"^\d{{2}}{_L}{{2}}\d{{4,6}}$", text):
-            is_perfect_match = True
-
-        # B.3: Xe máy dùng 1 chữ 1 số — Ví dụ: 29A112345
-        elif re.match(rf"^\d{{2}}{_L}[1-9]\d{{4,6}}$", text):
-            is_perfect_match = True
-
-        # B.4: Xe mang ký hiệu đặc biệt hoặc ngoại giao — Ví dụ: 29LD12345, 29123NG45
-        elif re.match(rf"^\d{{2,5}}{_SPEC}\d{{2,6}}$", text):
-            is_perfect_match = True
-
-    # Đúng định dạng 100% → hợp lệ
-    if is_perfect_match:
-        return True
-
-    # Nếu không chuẩn 100% (AI đọc sót chữ) nhưng chuỗi đủ dài >= 5 ký tự
-    # → Vẫn cho qua để hiển thị lên màn hình (để mắt người tự luận).
-    if len(text) >= 5:
-        return True
-
-    return False
-
-# ─────────────────────────────────────────────
-# Hàm tìm file model tốt nhất
-# ─────────────────────────────────────────────
-
-
-def find_best_model():
-    """Tìm file weights best.pt theo thứ tự ưu tiên: weights/, root, runs/detect/**/."""
-    wd = os.path.join(REPO_ROOT, "weights")
-    from_package = glob.glob(
-        os.path.join(REPO_ROOT, "runs", "detect", "**", "best.pt"),
-        recursive=True,
+def find_best_model() -> str | None:
+    """Tìm model ONNX được đóng gói hoặc model trong workspace."""
+    relative_candidates = (
+        Path("models/best_vietnam_lpr.onnx"),
+        Path("weights/best_vietnam_lpr.onnx"),
+        Path("runs/detect/vietnam_lpr/yolov8_local/weights/best.onnx"),
     )
-    candidates = [
-        os.path.join(wd, "best_vietnam_lpr.pt"),
-        os.path.join(wd, "best.pt"),
-        os.path.join(REPO_ROOT, "best_vietnam_lpr.pt"),
-        os.path.join(REPO_ROOT, "best.pt"),
-        *from_package,
-        "best_vietnam_lpr.pt",
-        "best.pt",
-        *glob.glob("runs/detect/**/best.pt", recursive=True),
-    ]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return os.path.normpath(path)
+    for root in _resource_roots():
+        for relative in relative_candidates:
+            candidate = root / relative
+            if candidate.is_file():
+                return str(candidate)
     return None
 
 
-# ─────────────────────────────────────────────
-# LicensePlateRecognizer
-# ─────────────────────────────────────────────
+def clean_plate_text(text: str) -> str:
+    """Chuẩn hóa OCR và sửa các nhầm lẫn chữ/số phổ biến."""
+    cleaned = re.sub(r"[^A-Z0-9]", "", text.upper())
+    if len(cleaned) < 5:
+        return cleaned
 
-class LicensePlateRecognizer:
-    """
-    Nhận dạng biển số xe Việt Nam end-to-end.
-    Kết hợp YOLOv8 (phát hiện) và PaddleOCR (đọc ký tự).
+    chars = list(cleaned)
+    for index in range(min(2, len(chars))):
+        chars[index] = _LETTER_AS_DIGIT.get(chars[index], chars[index])
 
-    GHI CHÚ: YOLO chạy GPU (truyền device khi gọi track/predict).
-              PaddleOCR luôn chạy CPU để tránh conflict CUDA context với PyTorch.
-              enable_mkldnn=True tăng tốc PaddleOCR trên CPU ~30-40%.
-    """
+    if len(chars) > 2:
+        chars[2] = _DIGIT_AS_LETTER.get(chars[2], chars[2])
 
-    def __init__(self, yolo_model_path, confidence_threshold=0.3,
-                 plate_class_id=PLATE_CLASS_ID, use_gpu=False,
-                 roi=None):
-        """
-        Tham số:
-            yolo_model_path:      đường dẫn file weights .pt
-            confidence_threshold: ngưỡng confidence detection tối thiểu (0–1)
-            plate_class_id:       index class 'biển số' trong dataset
-            use_gpu:              True để YOLO dùng GPU (PaddleOCR luôn CPU)
-            roi:                  (x1%, y1%, x2%, y2%) tỷ lệ 0.0–1.0, hoặc None
-        """
-        logger.info("Đang tải model YOLOv8...")
-        self.yolo = YOLO(yolo_model_path)
-        self.use_gpu = use_gpu
+    # Một hoặc hai ký tự sê-ri, sau đó là dãy số.
+    digit_start = 4 if len(chars) >= 9 and chars[3].isalpha() else 3
+    if digit_start == 4:
+        chars[3] = _DIGIT_AS_LETTER.get(chars[3], chars[3])
+    for index in range(digit_start, len(chars)):
+        chars[index] = _LETTER_AS_DIGIT.get(chars[index], chars[index])
+    return "".join(chars)
 
-        logger.info("Đang tải PaddleOCR...")
-        # PaddleOCR luôn chạy CPU — tránh conflict CUDA context với YOLO/PyTorch.
-        # MKL-DNN đang tắt để tránh crash ngầm trên một số máy Windows.
-        self.ocr = PaddleOCR(
-            lang="en",
-            device="cpu",
-            enable_mkldnn=False,                 # Giữ False để tránh crash ngầm
-            cpu_threads=4,                       # 4 luồng, nhường CPU cho camera thread
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
+
+def is_valid_vietnam_plate(text: str) -> bool:
+    """Kiểm tra các dạng biển số Việt Nam thông dụng."""
+    value = re.sub(r"[^A-Z0-9]", "", text.upper())
+    if not 7 <= len(value) <= 10:
+        return False
+
+    patterns = (
+        r"\d{2}[A-Z]\d{4,6}",           # ô tô: 30A12345
+        r"\d{2}[A-Z]{2}\d{4,6}",       # xe máy: 29AB12345
+        r"\d{2}[A-Z][1-9]\d{4,6}",     # xe máy: 29A112345
+        r"\d{2,5}(LD|DA|KT|CD|RM|HC|MK|NG|QT|CV|NN)\d{2,6}",
+        r"[ABHKQTPCV][A-Z]\d{4,5}",     # quân đội
+    )
+    return any(re.fullmatch(pattern, value) for pattern in patterns)
+
+
+def _letterbox(image: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
+    height, width = image.shape[:2]
+    scale = min(size / width, size / height)
+    new_width = max(1, round(width * scale))
+    new_height = max(1, round(height * scale))
+    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    pad_x = (size - new_width) // 2
+    pad_y = (size - new_height) // 2
+    canvas = np.full((size, size, 3), 114, dtype=np.uint8)
+    canvas[pad_y:pad_y + new_height, pad_x:pad_x + new_width] = resized
+    return canvas, scale, pad_x, pad_y
+
+
+class OnnxPlateDetector:
+    """YOLOv8 inference tối giản bằng ONNX Runtime."""
+
+    def __init__(self, model_path: str, confidence: float = DEFAULT_CONFIDENCE):
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 2) // 2))
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            model_path,
+            sess_options=options,
+            providers=["CPUExecutionProvider"],
         )
+        self.input = self.session.get_inputs()[0]
+        self.output_name = self.session.get_outputs()[0].name
+        self.input_size = int(self.input.shape[-1])
+        self.confidence = confidence
+        self.class_names = self._read_class_names()
 
-        self.conf_threshold = confidence_threshold
-        self.plate_class_id = plate_class_id
+    def _read_class_names(self) -> dict[int, str]:
+        raw = self.session.get_modelmeta().custom_metadata_map.get("names", "")
+        try:
+            names = ast.literal_eval(raw)
+            return {int(key): str(value) for key, value in names.items()}
+        except (SyntaxError, ValueError, AttributeError):
+            return {PLATE_CLASS_ID: "plate"}
 
-        # ROI — tỷ lệ % (0.0–1.0) để không phụ thuộc vào độ phân giải camera
-        self.roi = roi
-        if roi:
-            logger.info(f"ROI đang bật: x=[{roi[0]:.0%}–{roi[2]:.0%}], "
-                        f"y=[{roi[1]:.0%}–{roi[3]:.0%}]")
-        else:
-            logger.info("ROI: tắt (phát hiện toàn khung hình)")
-
-        logger.info("[HOÀN TẤT] Pipeline sẵn sàng!")
-
-    # ── Các hàm hỗ trợ ROI ──────────────────────────────────────
-
-    def set_roi(self, roi):
-        """Đặt ROI dạng (x1_pct, y1_pct, x2_pct, y2_pct) trong khoảng 0.0–1.0."""
-        self.roi = roi
-        if roi:
-            logger.info(f"ROI đã cập nhật: {roi}")
-        else:
-            logger.info("ROI đã xóa")
-
-    def _is_inside_roi(self, x1, y1, x2, y2, frame_w, frame_h):
-        """Kiểm tra xem tâm bounding box có nằm trong vùng ROI không."""
-        if self.roi is None:
-            return True
-        rx1 = int(self.roi[0] * frame_w)
-        ry1 = int(self.roi[1] * frame_h)
-        rx2 = int(self.roi[2] * frame_w)
-        ry2 = int(self.roi[3] * frame_h)
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
-
-    def get_roi_pixels(self, frame_w, frame_h):
-        """Trả về ROI dạng tọa độ pixel (x1, y1, x2, y2) hoặc None."""
-        if self.roi is None:
-            return None
-        return (
-            int(self.roi[0] * frame_w), int(self.roi[1] * frame_h),
-            int(self.roi[2] * frame_w), int(self.roi[3] * frame_h),
+    def detect(self, frame: np.ndarray) -> list[tuple[int, int, int, int, float]]:
+        image, scale, pad_x, pad_y = _letterbox(frame, self.input_size)
+        tensor = cv2.dnn.blobFromImage(
+            image, scalefactor=1.0 / 255.0, size=(self.input_size, self.input_size),
+            swapRB=True, crop=False,
         )
+        output = self.session.run([self.output_name], {self.input.name: tensor})[0]
+        prediction = np.squeeze(output, axis=0)
+        if prediction.shape[0] < prediction.shape[1]:
+            prediction = prediction.T
 
-    def detect_plates(self, frame):
-        """
-        Chạy YOLOv8 trên frame và trả về danh sách bounding box biển số.
-        Các biển số có tâm nằm ngoài ROI sẽ bị bỏ qua.
+        class_scores = prediction[:, 4:]
+        class_ids = np.argmax(class_scores, axis=1)
+        scores = class_scores[np.arange(len(prediction)), class_ids]
+        keep = (class_ids == PLATE_CLASS_ID) & (scores >= self.confidence)
+        prediction = prediction[keep]
+        scores = scores[keep]
+        if len(prediction) == 0:
+            return []
 
-        Trả về:
-            list of (x1, y1, x2, y2, confidence)
-        """
-        fh, fw = frame.shape[:2]
-        results = self.yolo(frame, conf=self.conf_threshold, verbose=False)
-        plates = []
-        for result in results:
-            for box in result.boxes:
-                if int(box.cls[0]) != self.plate_class_id:
-                    continue
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                conf = float(box.conf[0])
+        boxes_xywh = prediction[:, :4]
+        boxes_for_nms: list[list[int]] = []
+        boxes_xyxy: list[tuple[int, int, int, int]] = []
+        frame_h, frame_w = frame.shape[:2]
+        for cx, cy, width, height in boxes_xywh:
+            x1 = int((cx - width / 2 - pad_x) / scale)
+            y1 = int((cy - height / 2 - pad_y) / scale)
+            x2 = int((cx + width / 2 - pad_x) / scale)
+            y2 = int((cy + height / 2 - pad_y) / scale)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame_w - 1, x2), min(frame_h - 1, y2)
+            if x2 <= x1 or y2 <= y1:
+                boxes_for_nms.append([0, 0, 0, 0])
+                boxes_xyxy.append((0, 0, 0, 0))
+                continue
+            boxes_for_nms.append([x1, y1, x2 - x1, y2 - y1])
+            boxes_xyxy.append((x1, y1, x2, y2))
 
-                # ── Lọc ROI ──
-                if not self._is_inside_roi(x1, y1, x2, y2, fw, fh):
-                    continue
+        selected = cv2.dnn.NMSBoxes(boxes_for_nms, scores.tolist(), self.confidence, 0.45)
+        if len(selected) == 0:
+            return []
+        indices = np.asarray(selected).reshape(-1)
+        return [(*boxes_xyxy[index], float(scores[index])) for index in indices]
 
-                plates.append([x1, y1, x2, y2, conf])
 
-        # Gộp các box chồng lấp
-        merged = []
-        while plates:
-            base = plates.pop(0)
-            base_x1, base_y1, base_x2, base_y2, base_conf = base
+def _preprocess_plate(crop: np.ndarray) -> np.ndarray:
+    height, width = crop.shape[:2]
+    if width < 320:
+        scale = 320 / max(width, 1)
+        crop = cv2.resize(
+            crop, (320, max(32, round(height * scale))), interpolation=cv2.INTER_CUBIC,
+        )
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
+    gray = clahe.apply(gray)
+    sharpened = cv2.addWeighted(gray, 1.5, cv2.GaussianBlur(gray, (0, 0), 2), -0.5, 0)
+    enhanced = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+    border = max(4, enhanced.shape[1] // 40)
+    return cv2.copyMakeBorder(
+        enhanced, border, border, border, border, cv2.BORDER_CONSTANT,
+        value=(255, 255, 255),
+    )
 
-            i = 0
-            while i < len(plates):
-                x1, y1, x2, y2, conf = plates[i]
-                ix1, iy1 = max(base_x1, x1), max(base_y1, y1)
-                ix2, iy2 = min(base_x2, x2), min(base_y2, y2)
-                inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                area1 = (base_x2 - base_x1) * (base_y2 - base_y1)
-                area2 = (x2 - x1) * (y2 - y1)
-                if inter_area > 0.3 * min(area1, area2):
-                    base_x1, base_y1 = min(base_x1, x1), min(base_y1, y1)
-                    base_x2, base_y2 = max(base_x2, x2), max(base_y2, y2)
-                    base_conf = max(base_conf, conf)
-                    plates.pop(i)
-                else:
-                    i += 1
-            merged.append((base_x1, base_y1, base_x2, base_y2, base_conf))
 
-        return merged
+class OnnxPlateOCR:
+    def __init__(self):
+        # Model small mặc định đã nằm trong wheel RapidOCR, chạy offline.
+        self.engine = RapidOCR()
 
-    def ocr_plate_crop(self, crop):
-        """
-        Chạy OCR trên ảnh crop biển số. Trả về (text_đã_làm_sạch, conf, raw, hợp_lệ).
-        Đây là bước CHẬM (~100-300ms mỗi biển số).
-        """
+    def read(self, crop: np.ndarray) -> tuple[str, float, str, bool]:
         if crop.size == 0:
             return "", 0.0, "", False
-
-        raw_text, ocr_conf = read_plate_text(self.ocr, crop)
-        if ocr_conf < MIN_OCR_CONFIDENCE:
-            return "", 0.0, raw_text, False
-
+        result = self.engine(_preprocess_plate(crop), use_det=True, use_cls=False, use_rec=True)
+        texts = tuple(getattr(result, "txts", ()) or ())
+        scores = tuple(getattr(result, "scores", ()) or ())
+        if not texts:
+            return "", 0.0, "", False
+        raw_text = " ".join(str(text) for text in texts).upper().strip()
+        confidence = float(np.mean(scores)) if scores else 0.0
         cleaned = clean_plate_text(raw_text)
-        valid = is_valid_vietnam_plate(cleaned)
-        return cleaned, ocr_conf, raw_text, valid
+        return cleaned, confidence, raw_text, is_valid_vietnam_plate(cleaned)
 
-    def recognize(self, frame):
-        """
-        Phát hiện biển số và đọc ký tự (single-shot, dùng cho ảnh tĩnh).
 
-        Trả về:
-            list các dict với các key:
-                bbox, detection_conf, raw_text, text, ocr_conf,
-                is_valid, plate_crop
-        """
-        recognitions = []
-        h, w = frame.shape[:2]
+def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    return intersection / (area_a + area_b - intersection)
 
-        for (x1, y1, x2, y2, det_conf) in self.detect_plates(frame):
-            pad = 20
-            crop = frame[max(0, y1 - pad): min(h, y2 + pad),
-                         max(0, x1 - pad): min(w, x2 + pad)]
-            if crop.size == 0:
-                continue
 
-            cleaned, ocr_conf, raw_text, valid = self.ocr_plate_crop(crop)
-            if not cleaned:
-                continue
+@dataclass
+class _Track:
+    bbox: tuple[int, int, int, int]
+    text: str = ""
+    raw_text: str = ""
+    ocr_conf: float = 0.0
+    valid: bool = False
+    last_seen: float = 0.0
+    last_ocr: float = 0.0
 
+
+class LicensePlateRecognizer:
+    """API mức cao cho ảnh tĩnh, video và camera."""
+
+    def __init__(self, model_path: str | None = None, confidence_threshold: float = DEFAULT_CONFIDENCE):
+        selected_model = model_path or find_best_model()
+        if not selected_model:
+            raise FileNotFoundError("Không tìm thấy models/best_vietnam_lpr.onnx")
+        self.detector = OnnxPlateDetector(selected_model, confidence_threshold)
+        self.ocr = OnnxPlateOCR()
+        self._tracks: list[_Track] = []
+        self._recent: dict[str, float] = {}
+
+    @staticmethod
+    def _crop(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
+        x1, y1, x2, y2 = bbox
+        height, width = frame.shape[:2]
+        pad_x = max(8, (x2 - x1) // 10)
+        pad_y = max(6, (y2 - y1) // 5)
+        return frame[
+            max(0, y1 - pad_y):min(height, y2 + pad_y),
+            max(0, x1 - pad_x):min(width, x2 + pad_x),
+        ]
+
+    def recognize(self, frame: np.ndarray) -> list[dict]:
+        recognitions: list[dict] = []
+        for x1, y1, x2, y2, detection_conf in self.detector.detect(frame):
+            bbox = (x1, y1, x2, y2)
+            crop = self._crop(frame, bbox)
+            text, ocr_conf, raw_text, valid = self.ocr.read(crop)
             recognitions.append({
-                "bbox":           (x1, y1, x2, y2),
-                "detection_conf": det_conf,
-                "raw_text":       raw_text,
-                "text":           cleaned,
-                "ocr_conf":       ocr_conf,
-                "is_valid":       valid,
-                "plate_crop":     crop,
+                "bbox": bbox,
+                "detection_conf": detection_conf,
+                "raw_text": raw_text,
+                "text": text,
+                "ocr_conf": ocr_conf,
+                "is_valid": valid,
             })
-
         return recognitions
 
-    def draw_results(self, frame, recognitions):
-        """
-        Vẽ bounding box và text biển số lên bản sao của frame.
+    def reset_stream(self) -> None:
+        self._tracks.clear()
+        self._recent.clear()
 
-        Trả về:
-            ảnh đã chú thích (numpy array, BGR)
-        """
-        output = frame.copy()
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
+    def process_stream_frame(self, frame: np.ndarray) -> tuple[np.ndarray, list[dict], list[dict]]:
+        """Nhận dạng frame với cache không gian để tránh OCR lặp lại."""
+        now = time.monotonic()
+        detections = self.detector.detect(frame)
+        active_tracks: list[_Track] = []
+        used: set[int] = set()
+        results: list[dict] = []
+        events: list[dict] = []
 
-        for rec in recognitions:
-            x1, y1, x2, y2 = rec["bbox"]
-            text = rec["text"]
-            ocr_conf = rec["ocr_conf"]
-            # Xanh lá = hợp lệ, vàng = chưa xác định
-            color = (0, 255, 0) if rec.get("is_valid", True) else (0, 215, 255)
-
-            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
-
-            if not text:
-                label = "..."
-                label_color = (180, 180, 180)
+        for x1, y1, x2, y2, detection_conf in detections:
+            bbox = (x1, y1, x2, y2)
+            best_index = -1
+            best_iou = 0.0
+            for index, track in enumerate(self._tracks):
+                if index in used:
+                    continue
+                overlap = _iou(bbox, track.bbox)
+                if overlap > best_iou:
+                    best_iou, best_index = overlap, index
+            if best_index >= 0 and best_iou >= 0.25:
+                track = self._tracks[best_index]
+                used.add(best_index)
+                track.bbox = bbox
             else:
-                label = f"{text} ({ocr_conf:.0%})"
-                label_color = (0, 0, 0)
+                track = _Track(bbox=bbox)
+            track.last_seen = now
 
-            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            label_y = max(y1 - 10, th + 5)
-            cv2.rectangle(output,
-                          (x1, label_y - th - 5),
-                          (x1 + tw, label_y + 3),
-                          color, -1)
-            cv2.putText(output, label, (x1, label_y),
-                        font, font_scale, label_color, thickness, cv2.LINE_AA)
+            box_width = x2 - x1
+            should_ocr = box_width >= 55 and (
+                track.last_ocr == 0.0 or (not track.valid and now - track.last_ocr >= 0.9)
+            )
+            if should_ocr:
+                track.last_ocr = now
+                text, confidence, raw_text, valid = self.ocr.read(self._crop(frame, bbox))
+                if text and confidence >= track.ocr_conf:
+                    track.text = text
+                    track.raw_text = raw_text
+                    track.ocr_conf = confidence
+                    track.valid = valid
 
+            item = {
+                "bbox": bbox,
+                "detection_conf": detection_conf,
+                "raw_text": track.raw_text,
+                "text": track.text,
+                "ocr_conf": track.ocr_conf,
+                "is_valid": track.valid,
+            }
+            results.append(item)
+            active_tracks.append(track)
+
+            accepted = track.valid or (len(track.text) >= 7 and track.ocr_conf >= 0.65)
+            last_event = self._recent.get(track.text, 0.0)
+            if accepted and track.text and now - last_event >= 8.0:
+                events.append(item.copy())
+                self._recent[track.text] = now
+
+        self._tracks = active_tracks
+        self._recent = {text: seen for text, seen in self._recent.items() if now - seen < 60.0}
+        return self.draw_results(frame, results), results, events
+
+    @staticmethod
+    def draw_results(frame: np.ndarray, recognitions: list[dict]) -> np.ndarray:
+        output = frame.copy()
+        for result in recognitions:
+            x1, y1, x2, y2 = result["bbox"]
+            valid = result.get("is_valid", False)
+            color = (36, 214, 107) if valid else (45, 183, 255)
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+            text = result.get("text") or "Dang doc..."
+            confidence = result.get("ocr_conf", 0.0)
+            label = f"{text}  {confidence:.0%}" if confidence else text
+            (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+            top = max(label_h + 8, y1)
+            cv2.rectangle(output, (x1, top - label_h - 8), (x1 + label_w + 8, top), color, -1)
+            cv2.putText(output, label, (x1 + 4, top - 5), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.58, (16, 24, 32), 2, cv2.LINE_AA)
         return output

@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv-app/
+.venv-build/
+.build/
+dist/
 .ipynb_checkpoints/
 
 # YOLO training runs
@@ -26,10 +30,12 @@ captures/
 ~$*
 dataset/
 *.onnx
+!models/
+!models/best_vietnam_lpr.onnx
 *.mp4
 *.avi
 *.jpg
 *.png
 
-# Local configurations
+# Tệp ROI cũ trên máy local; desktop app không sử dụng.
 config/roi.yaml
