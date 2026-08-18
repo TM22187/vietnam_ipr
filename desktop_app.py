@@ -1,4 +1,4 @@
-"""Điểm vào và giao diện desktop của Vietnam LPR."""
+"""Giao diện desktop tối giản — Vietnam LPR."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 import cv2
 import numpy as np
@@ -18,36 +18,29 @@ from PIL import Image, ImageOps, ImageTk
 from app_events import AppEvents
 from app_runtime import (
     APP_NAME,
-    APP_VERSION,
     AppPaths,
     AppSettings,
-    SingleInstance,
     install_exception_logging,
     load_settings,
     setup_logging,
-    verify_model,
 )
 from app_worker import RecognitionWorker
-from history_store import HistoryStore, RecognitionRecord
 from lpr_pipeline import LicensePlateRecognizer, find_best_model, find_resource
 
-
 logger = logging.getLogger(__name__)
-BG = "#0f172a"
-PANEL = "#172033"
-PANEL_ALT = "#111a2c"
-TEXT = "#f8fafc"
-MUTED = "#94a3b8"
-ACCENT = "#22c55e"
-ACCENT_HOVER = "#16a34a"
+
+BG     = "#f5f5f5"
+TEXT   = "#1a1a1a"
+MUTED  = "#888888"
+BORDER = "#d0d0d0"
+ROW_BG = "#ffffff"
+ROW_ALT = "#f0f0f0"
 
 
 class VietnamLPRApp:
     def __init__(self, root: tk.Tk, paths: AppPaths, settings: AppSettings):
         self.root = root
-        self.paths = paths
         self.settings = settings
-        self.store = HistoryStore(paths.database_file, settings.history_limit)
         self.events = AppEvents()
         self.stop_event = threading.Event()
         self.worker = RecognitionWorker(self.events, self.stop_event, settings)
@@ -57,143 +50,125 @@ class VietnamLPRApp:
         self.closing = False
         self.close_deadline = 0.0
 
-        self.root.title(f"{APP_NAME} · Nhận dạng biển số")
-        self.root.geometry("1180x720")
-        self.root.minsize(920, 600)
+        self.root.title(APP_NAME)
+        self.root.geometry("900x560")
+        self.root.minsize(680, 420)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+
         icon = find_resource("assets/app.ico")
         if icon:
             try:
                 self.root.iconbitmap(icon)
             except tk.TclError:
-                logger.warning("Không tải được icon ứng dụng", exc_info=True)
+                pass
 
         self._configure_styles()
         self._build_ui()
-        self._load_history()
         self.root.after(35, self._poll_events)
 
+    # ------------------------------------------------------------------ styles
+
     def _configure_styles(self) -> None:
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TFrame", background=BG)
-        style.configure("Panel.TFrame", background=PANEL)
-        style.configure("Title.TLabel", background=BG, foreground=TEXT,
-                        font=("Segoe UI Semibold", 20))
-        style.configure("Subtitle.TLabel", background=BG, foreground=MUTED,
-                        font=("Segoe UI", 10))
-        style.configure("PanelTitle.TLabel", background=PANEL, foreground=TEXT,
-                        font=("Segoe UI Semibold", 12))
-        style.configure("Status.TLabel", background=PANEL_ALT, foreground=MUTED,
-                        font=("Segoe UI", 10), padding=(12, 9))
-        style.configure("Action.TButton", font=("Segoe UI Semibold", 10), padding=(14, 9),
-                        background=ACCENT, foreground="#052e16", borderwidth=0)
-        style.map("Action.TButton", background=[("active", ACCENT_HOVER), ("disabled", "#334155")],
-                  foreground=[("disabled", "#94a3b8")])
-        style.configure("Secondary.TButton", font=("Segoe UI", 10), padding=(13, 9),
-                        background="#263449", foreground=TEXT, borderwidth=0)
-        style.map("Secondary.TButton", background=[("active", "#334155")])
-        style.configure("Danger.TButton", font=("Segoe UI Semibold", 10), padding=(13, 9),
-                        background="#7f1d1d", foreground="#fecaca", borderwidth=0)
-        style.map("Danger.TButton", background=[("active", "#991b1b")])
-        style.configure("Treeview", background=PANEL_ALT, fieldbackground=PANEL_ALT,
-                        foreground=TEXT, rowheight=34, borderwidth=0, font=("Segoe UI", 10))
-        style.configure("Treeview.Heading", background="#263449", foreground=MUTED,
-                        font=("Segoe UI Semibold", 9), borderwidth=0)
-        style.map("Treeview", background=[("selected", "#1e3a5f")])
+        s = ttk.Style()
+        s.theme_use("clam")
+        s.configure("TFrame",        background=BG)
+        s.configure("Status.TLabel", background=BORDER, foreground=MUTED,
+                    font=("Segoe UI", 9), padding=(10, 6))
+        s.configure("TButton", font=("Segoe UI", 9), padding=(12, 6),
+                    background=ROW_BG, foreground=TEXT, borderwidth=1,
+                    relief="solid")
+        s.map("TButton",
+              background=[("active", ROW_ALT), ("disabled", BG)],
+              foreground=[("disabled", MUTED)])
+        s.configure("Treeview",
+                    background=ROW_BG, fieldbackground=ROW_BG,
+                    foreground=TEXT, rowheight=28, borderwidth=0,
+                    font=("Consolas", 11))
+        s.configure("Treeview.Heading",
+                    background=BG, foreground=MUTED,
+                    font=("Segoe UI", 8), borderwidth=0)
+        s.map("Treeview", background=[("selected", BORDER)])
+
+    # -------------------------------------------------------------------- UI
 
     def _build_ui(self) -> None:
-        header = ttk.Frame(self.root, padding=(24, 18, 24, 12))
-        header.pack(fill="x")
-        title_block = ttk.Frame(header)
-        title_block.pack(side="left")
-        ttk.Label(title_block, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
-            title_block,
-            text=f"Nhận dạng biển số Việt Nam · offline · v{APP_VERSION}",
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
+        # ── top bar ──────────────────────────────────────────────────────────
+        bar = tk.Frame(self.root, bg=BG, pady=10, padx=16)
+        bar.pack(fill="x")
 
-        controls = ttk.Frame(header)
-        controls.pack(side="right")
-        self.image_button = ttk.Button(
-            controls, text="Mở ảnh", style="Secondary.TButton", command=self._choose_image,
-        )
-        self.image_button.pack(side="left", padx=4)
-        self.video_button = ttk.Button(
-            controls, text="Mở video", style="Secondary.TButton", command=self._choose_video,
-        )
-        self.video_button.pack(side="left", padx=4)
-        self.camera_button = ttk.Button(
-            controls, text="Bật camera", style="Action.TButton",
+        tk.Label(bar, text=APP_NAME, bg=BG, fg=TEXT,
+                 font=("Segoe UI", 12)).pack(side="left")
+
+        self.stop_btn = ttk.Button(bar, text="Dừng",
+                                   command=self._stop, state="disabled")
+        self.stop_btn.pack(side="right", padx=(4, 0))
+
+        self.cam_btn = ttk.Button(
+            bar, text="Camera",
             command=lambda: self._start(
-                "camera", self.settings.camera_index, f"Camera {self.settings.camera_index}",
+                "camera",
+                self.settings.camera_index,
+                f"Camera {self.settings.camera_index}",
             ),
         )
-        self.camera_button.pack(side="left", padx=4)
-        self.stop_button = ttk.Button(
-            controls, text="Dừng", style="Danger.TButton", command=self._stop, state="disabled",
-        )
-        self.stop_button.pack(side="left", padx=(8, 0))
+        self.cam_btn.pack(side="right", padx=(4, 0))
 
-        content = ttk.Frame(self.root, padding=(24, 0, 24, 18))
-        content.pack(fill="both", expand=True)
+        self.video_btn = ttk.Button(bar, text="Mở video",
+                                    command=self._choose_video)
+        self.video_btn.pack(side="right")
+
+        # ── separator ────────────────────────────────────────────────────────
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
+
+        # ── main area (grid, tỷ lệ cố định 7:3) ─────────────────────────────
+        content = tk.Frame(self.root, bg=BG)
+        content.pack(fill="both", expand=True, padx=16, pady=12)
         content.columnconfigure(0, weight=7)
         content.columnconfigure(1, weight=3)
         content.rowconfigure(0, weight=1)
 
-        preview_panel = ttk.Frame(content, style="Panel.TFrame", padding=12)
-        preview_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        preview_panel.rowconfigure(1, weight=1)
-        preview_panel.columnconfigure(0, weight=1)
-        self.source_label = ttk.Label(
-            preview_panel, text="Chưa chọn nguồn", style="PanelTitle.TLabel",
-        )
-        self.source_label.grid(row=0, column=0, sticky="w", pady=(0, 9))
+        # preview (cột 0)
+        preview_wrap = tk.Frame(content, bg="#000000")
+        preview_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
         self.preview = tk.Label(
-            preview_panel, text="Chọn ảnh, video hoặc bật camera để bắt đầu",
-            bg="#090f1d", fg=MUTED, font=("Segoe UI", 11), compound="center",
+            preview_wrap,
+            text="Mở video hoặc bật camera để bắt đầu",
+            bg="#000000", fg=MUTED,
+            font=("Segoe UI", 10),
         )
-        self.preview.grid(row=1, column=0, sticky="nsew")
-        self.preview.bind("<Configure>", lambda _event: self._render_frame())
+        self.preview.pack(fill="both", expand=True)
+        self.preview.bind("<Configure>", lambda _e: self._render_frame())
 
-        history_panel = ttk.Frame(content, style="Panel.TFrame", padding=12)
-        history_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        history_panel.rowconfigure(1, weight=1)
-        history_panel.columnconfigure(0, weight=1)
-        history_header = ttk.Frame(history_panel, style="Panel.TFrame")
-        history_header.grid(row=0, column=0, sticky="ew", pady=(0, 9))
-        ttk.Label(history_header, text="Lịch sử nhận dạng", style="PanelTitle.TLabel").pack(side="left")
-        ttk.Button(
-            history_header, text="Xuất CSV", style="Secondary.TButton", command=self._export_history,
-        ).pack(side="right", padx=(4, 0))
-        ttk.Button(
-            history_header, text="Xóa", style="Secondary.TButton", command=self._clear_history,
-        ).pack(side="right")
+        # plate list (cột 1)
+        right = tk.Frame(content, bg=BG)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
 
-        self.history = ttk.Treeview(
-            history_panel, columns=("plate", "confidence", "time"),
+        tk.Label(right, text="Biển số", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        self.plate_list = ttk.Treeview(
+            right, columns=("plate", "time"),
             show="headings", selectmode="browse",
         )
-        self.history.heading("plate", text="BIỂN SỐ")
-        self.history.heading("confidence", text="TIN CẬY")
-        self.history.heading("time", text="THỜI GIAN")
-        self.history.column("plate", width=130, minwidth=95, anchor="w")
-        self.history.column("confidence", width=78, minwidth=65, anchor="center")
-        self.history.column("time", width=78, minwidth=65, anchor="center")
-        self.history.grid(row=1, column=0, sticky="nsew")
+        self.plate_list.heading("plate", text="SỐ HIỆU")
+        self.plate_list.heading("time",  text="GIỜ")
+        self.plate_list.column("plate", anchor="w")
+        self.plate_list.column("time",  width=72, minwidth=60, anchor="center")
+        self.plate_list.grid(row=1, column=0, sticky="nsew")
 
-        self.status = ttk.Label(self.root, text="Sẵn sàng", style="Status.TLabel", anchor="w")
-        self.status.pack(fill="x", side="bottom")
-
-    def _choose_image(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Chọn ảnh",
-            filetypes=[("Ảnh", "*.jpg *.jpeg *.png *.bmp *.webp"), ("Tất cả", "*.*")],
+        # ── separator + status bar ───────────────────────────────────────────
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x")
+        self.status = ttk.Label(
+            self.root, text="Sẵn sàng",
+            style="Status.TLabel", anchor="w",
         )
-        if path:
-            self._start("image", path, Path(path).name)
+        self.status.pack(fill="x")
+
+    # ----------------------------------------------------------------- control
 
     def _choose_video(self) -> None:
         path = filedialog.askopenfilename(
@@ -207,7 +182,6 @@ class VietnamLPRApp:
         if self.closing or (self.worker_thread and self.worker_thread.is_alive()):
             return
         self.stop_event.clear()
-        self.source_label.configure(text=label)
         self._set_running(True)
         self.worker_thread = threading.Thread(
             target=self.worker.run,
@@ -219,15 +193,16 @@ class VietnamLPRApp:
 
     def _stop(self) -> None:
         self.stop_event.set()
-        self.status.configure(text="Đang dừng an toàn…")
-        self.stop_button.configure(state="disabled")
+        self.status.configure(text="Đang dừng…")
+        self.stop_btn.configure(state="disabled")
 
     def _set_running(self, running: bool) -> None:
-        source_state = "disabled" if running or self.closing else "normal"
-        self.image_button.configure(state=source_state)
-        self.video_button.configure(state=source_state)
-        self.camera_button.configure(state=source_state)
-        self.stop_button.configure(state="normal" if running and not self.closing else "disabled")
+        state = "disabled" if running or self.closing else "normal"
+        self.cam_btn.configure(state=state)
+        self.video_btn.configure(state=state)
+        self.stop_btn.configure(state="normal" if running and not self.closing else "disabled")
+
+    # ------------------------------------------------------------------ events
 
     def _poll_events(self) -> None:
         frame = self.events.take_frame()
@@ -241,7 +216,6 @@ class VietnamLPRApp:
                 self.status.configure(text=payload)
             elif kind == "error":
                 self.status.configure(text=f"Lỗi: {payload}")
-                messagebox.showerror(APP_NAME, payload)
             elif kind == "done":
                 self._set_running(False)
         if not self.closing:
@@ -250,76 +224,23 @@ class VietnamLPRApp:
     def _render_frame(self) -> None:
         if self.last_frame is None:
             return
-        width = max(64, self.preview.winfo_width() - 4)
-        height = max(64, self.preview.winfo_height() - 4)
+        w = max(64, self.preview.winfo_width()  - 2)
+        h = max(64, self.preview.winfo_height() - 2)
         rgb = cv2.cvtColor(self.last_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
-        image = ImageOps.contain(image, (width, height), Image.Resampling.LANCZOS)
+        image = ImageOps.contain(Image.fromarray(rgb), (w, h), Image.Resampling.LANCZOS)
         self.preview_photo = ImageTk.PhotoImage(image)
         self.preview.configure(image=self.preview_photo, text="")
-
-    @staticmethod
-    def _local_time(captured_at: str) -> str:
-        try:
-            return datetime.fromisoformat(captured_at).astimezone().strftime("%d/%m %H:%M:%S")
-        except ValueError:
-            return captured_at
-
-    def _insert_history(self, record: RecognitionRecord, at_top: bool = True) -> None:
-        self.history.insert(
-            "", 0 if at_top else "end",
-            values=(record.plate, f"{record.ocr_confidence:.0%}", self._local_time(record.captured_at)),
-        )
-        items = self.history.get_children()
-        for item in items[100:]:
-            self.history.delete(item)
-
-    def _load_history(self) -> None:
-        for record in self.store.recent(100):
-            self._insert_history(record, at_top=False)
 
     def _add_plate(self, result: dict) -> None:
         text = str(result.get("text", ""))
         if not text:
             return
-        record = RecognitionRecord.create(
-            plate=text,
-            ocr_confidence=float(result.get("ocr_conf", 0.0)),
-            detection_confidence=float(result.get("detection_conf", 0.0)),
-            is_valid=bool(result.get("is_valid", False)),
-            source_type=str(result.get("source_type", "unknown")),
-            source_name=str(result.get("source_name", "unknown")),
-        )
-        try:
-            self.store.add(record)
-            self._insert_history(record)
-        except Exception:
-            logger.exception("Không lưu được lịch sử")
-            self.status.configure(text="Cảnh báo: không lưu được lịch sử nhận dạng")
+        now = datetime.now().strftime("%H:%M:%S")
+        self.plate_list.insert("", 0, values=(text, now))
+        for item in self.plate_list.get_children()[200:]:
+            self.plate_list.delete(item)
 
-    def _clear_history(self) -> None:
-        if not messagebox.askyesno(APP_NAME, "Xóa toàn bộ lịch sử nhận dạng đã lưu?"):
-            return
-        self.store.clear()
-        for item in self.history.get_children():
-            self.history.delete(item)
-        self.status.configure(text="Đã xóa lịch sử")
-
-    def _export_history(self) -> None:
-        destination = filedialog.asksaveasfilename(
-            title="Xuất lịch sử",
-            defaultextension=".csv",
-            initialfile=f"vietnam-lpr-{datetime.now():%Y%m%d-%H%M}.csv",
-            filetypes=[("CSV", "*.csv")],
-        )
-        if not destination:
-            return
-        try:
-            count = self.store.export_csv(destination)
-            self.status.configure(text=f"Đã xuất {count} bản ghi")
-        except OSError as exc:
-            logger.exception("Không xuất được CSV")
-            messagebox.showerror(APP_NAME, f"Không thể ghi file CSV:\n{exc}")
+    # ------------------------------------------------------------------- close
 
     def _close(self) -> None:
         if self.closing:
@@ -328,28 +249,23 @@ class VietnamLPRApp:
         self.close_deadline = time.monotonic() + 4.0
         self.stop_event.set()
         self._set_running(False)
-        self.status.configure(text="Đang đóng tài nguyên…")
         self._finish_close()
 
     def _finish_close(self) -> None:
-        if (
-            self.worker_thread
-            and self.worker_thread.is_alive()
-            and time.monotonic() < self.close_deadline
-        ):
+        if (self.worker_thread
+                and self.worker_thread.is_alive()
+                and time.monotonic() < self.close_deadline):
             self.root.after(50, self._finish_close)
             return
-        if self.worker_thread and self.worker_thread.is_alive():
-            logger.warning("Worker chưa dừng sau timeout")
-        self.store.close()
         self.root.destroy()
 
+
+# --------------------------------------------------------------------------- #
 
 def run_smoke_test() -> None:
     model = find_best_model()
     if not model:
         raise FileNotFoundError("Không tìm thấy model")
-    verify_model(model)
     root = tk.Tk()
     root.withdraw()
     root.update_idletasks()
@@ -367,17 +283,10 @@ def main() -> None:
     if "--smoke-test" in sys.argv:
         run_smoke_test()
         return
-    with SingleInstance() as instance:
-        if instance.already_running:
-            ctypes_message = "Vietnam LPR đang chạy. Hãy mở cửa sổ hiện có."
-            if sys.platform == "win32":
-                import ctypes
-                ctypes.windll.user32.MessageBoxW(None, ctypes_message, APP_NAME, 0x40)
-            return
-        settings = load_settings(paths)
-        root = tk.Tk()
-        VietnamLPRApp(root, paths, settings)
-        root.mainloop()
+    settings = load_settings(paths)
+    root = tk.Tk()
+    VietnamLPRApp(root, paths, settings)
+    root.mainloop()
 
 
 if __name__ == "__main__":

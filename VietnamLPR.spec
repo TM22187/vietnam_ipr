@@ -12,9 +12,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(root / "models" / "best_vietnam_lpr.onnx"), "models"),
-        (str(root / "models" / "model_manifest.json"), "models"),
         (str(root / "assets" / "app.ico"), "assets"),
-        (str(root / "THIRD_PARTY_NOTICES.md"), "."),
         *rapidocr_data,
     ],
     hiddenimports=rapidocr_hidden,
